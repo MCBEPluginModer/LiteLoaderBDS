@@ -9,7 +9,14 @@
 
 #define BEFORE_EXTRA
 // Include Headers or Declare Types Here
-#include "CommandFlag.hpp"
+#include "CommandData.hpp"
+#include "CommandOutputMessag.hpp"
+#include "CommandOriginDat.hpp"
+#include "CommandPermissions.hpp"
+#include "CommandParameter.hpp"
+#include "CommandEnum.hpp"
+#include "CommandEnumConstraint.hpp"
+#include "BinaryStream.hpp"
 enum class CommandPermissionLevel : char;
 
 #undef BEFORE_EXTRA
@@ -23,100 +30,205 @@ class AvailableCommandsPacket : public Packet {
 #define AFTER_EXTRA
 // Add Member There
 public:
-    struct EnumData
-    {
-        std::string name;
-        std::vector<unsigned int> valueIndices;
-    };//56
-    struct ConstrainedValueData
-    {
-        int enumIndex;
-        int enumNameIndex;
-        std::vector<unsigned char> indices;
-    };
-    struct ParamData
-    {
-        std::string desc;
-        unsigned int sym;
-    };
-    struct OverloadData
-    {
-        std::vector<ParamData> datas;
-    };
-    struct CommandData
-    {
-        std::string name;                    //0
-        std::string description;             //32
-        CommandFlag flag;                    //64
-        CommandPermissionLevel perm;         //66
-        std::vector<OverloadData> overloads; //72
-        signed int aliasIndex;               //96
-    };//104
-    struct SoftEnumData
-    {
-        std::string name;
-        std::vector<std::string> values;
-    };//56
+const int ARG_TYPE_WILDCARD_TARGET = 0x0a;
 
-std::vector<std::string> mAllEnums;//48
-std::vector<std::string> mAllSuffix;//72
-std::vector<EnumData> mEnumDatas;//96
-std::vector<CommandData> mCommandDatas;//120
-std::vector<SoftEnumData> mSoftEnums;//144
-std::vector<ConstrainedValueData> mConstrainedValueDatas; //168
-inline void test()
-{
-    static_assert(sizeof(AvailableCommandsPacket) == 192);
-    static_assert(sizeof(EnumData) == 56);
-    static_assert(sizeof(CommandData) == 104);
-    static_assert(offsetof(CommandData, perm) == 66);
-    static_assert(offsetof(AvailableCommandsPacket, mAllEnums) == 48);
-    static_assert(offsetof(AvailableCommandsPacket, mAllSuffix) == 72);
-    static_assert(offsetof(AvailableCommandsPacket, mConstrainedValueDatas) == 168);
-}
+const int ARG_TYPE_FILEPATH = 0x11;
+
+const int ARG_TYPE_FULL_INTEGER_RANGE = 0x17;
+
+const int ARG_TYPE_EQUIPMENT_SLOT = 0x26;
+const int ARG_TYPE_STRING = 0x27;
+
+const int ARG_TYPE_INT_POSITION = 0x2f;
+const int ARG_TYPE_POSITION = 0x30;
+
+const int ARG_TYPE_MESSAGE = 0x33;
+
+const int ARG_TYPE_RAWTEXT = 0x35;
+
+const int ARG_TYPE_JSON = 0x39;
+
+const int ARG_TYPE_BLOCK_STATES = 0x43;
+
+const int ARG_TYPE_COMMAND = 0x46;
+
+/**
+
+Enums are a little different: they are composed as follows:
+ARG_FLAG_ENUM | ARG_FLAG_VALID | (enum index)
+*/
+const int ARG_FLAG_ENUM = 0x200000;
+/** This is used for /xp <level: int>L. It can only be applied to integer parameters. */
+const int ARG_FLAG_POSTFIX = 0x1000000;
+
+const int ARG_FLAG_SOFT_ENUM = 0x4000000;
+
+const std::unordered_map<std::string, bool> HARDCODED_ENUM_NAMES =
+    std::unordered_map<std::string, bool>{{"CommandName", true}};
+
+/**
+
+@var CommandData[]
+List of command data, including name, description, alias indexes and parameters.
+*/
+std::vector<CommandData> commandData;
+/**
+
+@var CommandEnum[]
+List of enums which aren't directly referenced by any vanilla command.
+This is used for the CommandName enum, which is a magic enum used by the command argument type.
+*/
+std::vector<CommandEnum> hardcodedEnums;
+/**
+
+@var CommandEnum[]
+List of dynamic command enums, also referred to as "soft" enums. These can by dynamically updated mid-game
+without resending this packet.
+*/
+std::vector<CommandEnum> softEnums;
+/**
+
+@var CommandEnumConstraint[]
+List of constraints for enum members. Used to constrain gamerules that can bechanged in nocheats mode and more.
+*/
+std::vector<CommandEnumConstraint> enumConstraints;
 
 public:
-inline std::vector<std::string> getEnumNames()
-{
-    std::vector<std::string> names;
-    for (auto& data : mEnumDatas) {
-        names.push_back(data.name);
-    }
-    return names;
-}
-inline std::vector<std::string> getSoftEnumNames()
-{
-    std::vector<std::string> names;
-    for (auto& data : mSoftEnums)
-    {
-        names.push_back(data.name);
-    }
-    return names;
-}
-inline std::vector<std::string> getEnumValues(std::string const& name)
-{
-    std::vector<std::string> values;
-    for (auto& data : mEnumDatas)
-    {
-        if (data.name == name)
-        {
-            for (auto& index : data.valueIndices) {
-                values.push_back(mAllEnums.at(index));
+inline void initSoftEnumsInCommandData() {
+    for (const auto& datum : commandData) {
+        for (const auto& overload : datum.getOverloads()) {
+            for (const auto& parameter : overload) {
+                if ((parameter.paramType & ARG_FLAG_SOFT_ENUM) != 0) {
+                    int index = parameter.paramType & 0xffff;
+                    parameter.enum = softEnums[index];
+                    if (parameter.enum == nullptr) {
+                        throw runtime_error("deserializing " + datum.getName() + " parameter " +
+                                                    parameter.paramName + ": expected soft enum at " +
+                                                    std::to_string(index) + ", but got none");
+                    }
+                }
             }
+        }
+    }
+}
+
+CommandEnum getEnum(std::vector<std::string> enumValueList, BinaryStream& in) {
+    std::string enumName = in.getString();
+    std::vector<std::string> enumValues;
+    int listSize = enumValueList.size();
+
+    for (int i = 0, count = in.getUnsignedVarInt(); i < count; ++i) {
+        int index = getEnumValueIndex(listSize, in);
+        if (index >= enumValueList.size()) {
+            throw runtime_error("Invalid enum value index " + std::to_string(index));
+        }
+        // Get the enum value from the initial pile of mess
+        enumValues.push_back(enumValueList[index]);
+    }
+    return CommandEnum(enumName, enumValues,0);
+}
+
+CommandEnum getSoftEnum(BinaryStream& in) {
+    std::string enumName = in.getString();
+    std::vector<std::string> enumValues;
+    int count = in.getUnsignedVarInt();
+    for (int i = 0; i < count; ++i) {
+        // Get the enum value from the initial pile of mess
+        enumValues.push_back(in.getString());
+    }
+
+    return CommandEnum(enumName, enumValues, true);
+}
+
+void putEnum(CommandEnum& enumVal, std::unordered_map<std::string, int>& enumValueMap, BinaryStream& out) {
+    out.writeString(enumVal.getName());
+    const auto& values = enumVal.getValues();
+    out.writeUnsignedVarInt(values.size());
+    const auto listSize = enumValueMap.size();
+    for (const auto& value : values) {
+        if (enumValueMap.find(value) == enumValueMap.end()) {
+            throw std::logic_error("Enum value '" + value + "' doesn't have a value index");
+        }
+        putEnumValueIndex(enumValueMap.at(value), listSize, out);
+    }
+}
+
+void putSoftEnum(CommandEnum& enumObj, BinaryStream& out) {
+    out.writeString(enumObj.getName());
+    const auto& values = enumObj.getValues();
+    out.writeUnsignedVarInt(values.size());
+    for (const auto& value : values) {
+        out.writeString(value);
+    }
+}
+
+int getEnumValueIndex(int valueCount, BinaryStream& in) {
+    if (valueCount < 256) {
+        return in.getByte();
+    } else if (valueCount < 65536) {
+        return in.getSignedShort();
+    } else {
+        return in.getSignedInt();
+    }
+}
+
+void putEnumValueIndex(int index, int valueCount, BinaryStream& out) {
+    if (valueCount < 256) {
+        out.writeByte(index);
+    } else if (valueCount < 65536) {
+        out.writeSignedShort(index);
+    } else {
+        out.writeSignedInt(index);
+    }
+}
+
+CommandEnumConstraint getEnumConstraint(std::vector<CommandEnum>& enums,
+                                        std::vector<std::string>& enumValues, BinaryStream& in) {
+    int valueIndex = in.getSignedInt();
+    if (valueIndex >= static_cast<int>(enumValues.size())) {
+        throw runtime_error("Enum constraint refers to unknown enum value index " + std::to_string(valueIndex));
+    }
+    const std::string& value = enumValues[valueIndex];
+
+    int enumIndex = in.getSignedInt();
+    if (enumIndex >= static_cast<int>(enums.size())) {
+        throw runtime_error("Enum constraint refers to unknown enum index " + std::to_string(enumIndex));
+    }
+    CommandEnum& enumObj = enums[enumIndex];
+
+    int valueOffset = -1;
+    const auto& values = enumObj.getValues();
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (values[i] == value) {
+            valueOffset = static_cast<int>(i);
             break;
         }
     }
-    return values;
-}
-inline std::vector<std::string> getSoftEnumValues(std::string const& name)
-{
-    for (auto& data : mSoftEnums)
-    {
-        if (data.name == name)
-            return data.values;
+    if (valueOffset == -1) {
+        throw runtime_error("Value \"" + value + "\" does not belong to enum \"" + enumObj.getName() + "\"");
     }
-    return {};
+
+    std::vector<int> constraintIds;
+    size_t count = in.getUnsignedVarInt();
+    for (size_t i = 0; i < count; ++i) {
+        constraintIds.push_back(in.getByte());
+    }
+
+    return CommandEnumConstraint(enumObj, valueOffset, constraintIds);
 }
+
+void putEnumConstraint(CommandEnumConstraint constraint, std::unordered_map<std::string, int> enumIndexes,
+                       std::unordered_map<std::string, std::unordered_map<std::string, int>> enumValueIndexes,
+                       BinaryStream& out) {
+    out.writeSignedInt(enumValueIndexes[constraint.getEnum().getName()]
+                                [constraint.getEnum().getValues()[constraint.getAffectedValue()]]);
+    out.writeSignedInt(enumIndexes[constraint.getEnum().getName()]);
+    out.writeUnsignedVarInt(constraint.getConstraints().size());
+    for (auto v : constraint.getConstraints()) {
+        out.writeByte(v);
+    }
+}
+
 
 
 #undef AFTER_EXTRA

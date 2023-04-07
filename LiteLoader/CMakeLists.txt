@@ -19,7 +19,7 @@ file(
 # third-party source files
 file(GLOB_RECURSE THIRD_PARTY_SRC_FILES ${PROJECT_SOURCE_DIR}/third-party/src/*)
 
-add_library(LiteLoader SHARED ${SRC_FILES} ${THIRD_PARTY_SRC_FILES})
+add_library(LiteLoader SHARED ${SRC_FILES} ${THIRD_PARTY_SRC_FILES} "include/llapi/mc/CommandParameter.h")
 
 # Replace Compile Flag /EHsc to /EHa
 string(REPLACE "/EHsc" "/EHa" CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
